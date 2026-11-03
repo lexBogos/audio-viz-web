@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>audio-viz web</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="drop">Перетащите трек сюда или <label class="link">выберите файл<input id="file" type="file" accept="audio/*" hidden></label></div>
+  </div>
+  <div id="transport">
+    <button id="play" disabled>▶</button>
+    <span id="time">0:00 / 0:00</span>
+    <input id="seek" type="range" min="0" max="1" step="0.001" value="0" disabled>
+  </div>
+  <p id="status">Загрузка…</p>
+</main>
+<aside>
+  <h2>Пресет</h2>
+  <select id="preset"></select>
+  <h2>Цвет и движение</h2>
+  <div id="sliders"></div>
+</aside>
+<script type="module" src="main.js"></script>
+</body>
+</html>

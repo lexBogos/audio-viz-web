@@ -1,0 +1,29 @@
+[package]
+name = "audio-viz-web"
+version = "0.1.0"
+edition = "2024"
+description = "Browser build of audio-viz: the same shaders and analysis, running on the visitor's GPU via WebGPU"
+
+# Not part of the desktop crate: it builds only for wasm32 and pulls in none of the native deps.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+console_error_panic_hook = "0.1"
+image = { version = "0.25", default-features = false }
+pollster = "0.4"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+wgpu = { version = "25", default-features = false, features = ["webgpu", "wgsl"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
