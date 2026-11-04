@@ -22,6 +22,7 @@ dependencies = [
  "bytemuck",
  "console_error_panic_hook",
  "image",
+ "js-sys",
  "pollster",
  "rustfft",
  "serde",

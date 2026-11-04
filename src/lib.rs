@@ -14,7 +14,7 @@ mod gpu;
 mod presets;
 
 use analysis::Analysis;
-use gpu::{FrameInfo, Gpu, Look, Motion, Renderer, Uniforms};
+use gpu::{FrameInfo, Gpu, Look, Motion, Nv12, Renderer, Uniforms};
 use presets::{BUILTIN, Preset};
 use wasm_bindgen::prelude::*;
 
@@ -32,6 +32,19 @@ pub struct Viz {
     look: Look,
     preset: usize,
     frame: u64,
+    export: Option<Export>,
+}
+
+/// Offscreen render for video export: its own renderer at the export size, so the
+/// preview keeps running, plus NV12 conversion and a ring of readback buffers.
+struct Export {
+    renderer: Renderer,
+    nv12: Nv12,
+    staging: Vec<wgpu::Buffer>,
+    motion: Motion,
+    /// Look captured at the start: slider moves don't change a running export.
+    look: Look,
+    size: (u32, u32),
 }
 
 fn js_err(e: impl std::fmt::Display) -> JsValue {
@@ -82,7 +95,7 @@ impl Viz {
         surface.configure(&gpu.device, &config);
         let src = Preset::Builtin(0).source().map_err(js_err)?;
         let renderer = Renderer::new(&gpu, &src, format, size).map_err(js_err)?;
-        Ok(Viz { gpu, surface, config, renderer, motion: Motion::default(), track: None, look: Look::default(), preset: 0, frame: 0 })
+        Ok(Viz { gpu, surface, config, renderer, motion: Motion::default(), track: None, look: Look::default(), preset: 0, frame: 0, export: None })
     }
 
     /// Names of the built-in presets, in order.
@@ -173,6 +186,81 @@ impl Viz {
         self.gpu.queue.submit([enc.finish()]);
         frame.present();
         self.frame += 1;
+    }
+
+    /// Prepares an export of `width`x`height` (width % 4 == 0, height % 2 == 0) with
+    /// the current preset and look; `ring` readback buffers let frames overlap.
+    /// Returns the size of one NV12 frame in bytes.
+    pub fn export_start(&mut self, width: u32, height: u32, ring: usize) -> Result<u32, JsValue> {
+        if self.track.is_none() {
+            return Err(JsValue::from_str("no track loaded"));
+        }
+        if width % 4 != 0 || height % 2 != 0 {
+            return Err(JsValue::from_str("export size must have width % 4 == 0 and height % 2 == 0"));
+        }
+        let size = (width, height);
+        let src = Preset::Builtin(self.preset).source().map_err(js_err)?;
+        let renderer = Renderer::new(&self.gpu, &src, gpu::OUTPUT, size).map_err(js_err)?;
+        let nv12 = Nv12::new(&self.gpu.device, size);
+        let bytes = Nv12::frame_bytes(size);
+        let staging = (0..ring.max(1))
+            .map(|_| {
+                self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("readback"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        self.export = Some(Export { renderer, nv12, staging, motion: Motion::default(), look: self.look, size });
+        Ok(bytes as u32)
+    }
+
+    /// Renders export frame `index` at track time `t` into readback buffer `slot`.
+    /// The promise resolves once the NV12 bytes can be read with `export_read`.
+    pub fn export_frame(&mut self, index: u32, t: f64, slot: usize) -> Result<js_sys::Promise, JsValue> {
+        let ex = self.export.as_mut().ok_or_else(|| JsValue::from_str("export not started"))?;
+        let (analysis, duration) = self.track.as_ref().ok_or_else(|| JsValue::from_str("no track loaded"))?;
+        let buf = ex.staging.get(slot).ok_or_else(|| JsValue::from_str("bad slot"))?;
+        let look = ex.look;
+        let f = ex.motion.track(analysis, t, &|_| look);
+        let progress = (t / duration) as f32;
+        let u = Uniforms::new(&f, ex.size, ex.motion.time(), progress);
+        let info = FrameInfo { frame: index as u64, fade: 1.0, progress, layers: &[], scene: None, blend: None };
+        let mut enc = self.gpu.device.create_command_encoder(&Default::default());
+        ex.renderer.encode(&mut enc, &ex.nv12.view, &u, &look.at_time(t), &info);
+        ex.nv12.encode(&mut enc);
+        enc.copy_buffer_to_buffer(&ex.nv12.buffer, 0, buf, 0, Nv12::frame_bytes(ex.size));
+        self.gpu.queue.submit([enc.finish()]);
+        Ok(js_sys::Promise::new(&mut |resolve, reject| {
+            buf.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                let _ = match res {
+                    Ok(()) => resolve.call0(&JsValue::NULL),
+                    Err(e) => reject.call1(&JsValue::NULL, &JsValue::from_str(&e.to_string())),
+                };
+            });
+        }))
+    }
+
+    /// Copies the mapped NV12 frame of `slot` into `out` and frees the slot.
+    pub fn export_read(&mut self, slot: usize, out: &mut [u8]) -> Result<(), JsValue> {
+        let ex = self.export.as_ref().ok_or_else(|| JsValue::from_str("export not started"))?;
+        let buf = ex.staging.get(slot).ok_or_else(|| JsValue::from_str("bad slot"))?;
+        {
+            let data = buf.slice(..).get_mapped_range();
+            if out.len() != data.len() {
+                return Err(JsValue::from_str("output buffer has the wrong size"));
+            }
+            out.copy_from_slice(&data);
+        }
+        buf.unmap();
+        Ok(())
+    }
+
+    /// Frees the export's GPU resources (after finishing or cancelling).
+    pub fn export_end(&mut self) {
+        self.export = None;
     }
 
     /// Adapter name, for the status line. Browsers often hide it for privacy.

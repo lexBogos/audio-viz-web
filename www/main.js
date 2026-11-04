@@ -1,6 +1,7 @@
 // The page owns decoding and playback (Web Audio); the wasm module owns analysis
 // and rendering. Each animation frame passes the playback position to `render`.
 import init, { Viz } from './pkg/audio_viz_web.js';
+import { setupExport } from './export.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -26,7 +27,8 @@ const LOOK = [
 ];
 
 let viz;
-const audio = { ctx: null, buffer: null, source: null, offset: 0, startedAt: 0, playing: false, duration: 0 };
+let exportReady = () => {};
+const audio = { ctx: null, name: '', buffer: null, source: null, offset: 0, startedAt: 0, playing: false, duration: 0 };
 
 function position() {
   if (!audio.buffer) return undefined;
@@ -92,6 +94,8 @@ async function openFile(file) {
   audio.duration = viz.load(mono, buffer.sampleRate);
   const t2 = performance.now();
   audio.buffer = buffer;
+  audio.name = file.name;
+  exportReady();
   $('play').disabled = $('seek').disabled = false;
   $('seek').max = audio.duration;
   $('drop').hidden = true;
@@ -191,6 +195,7 @@ async function main() {
     return;
   }
   setupUi();
+  exportReady = setupExport({ viz, track: () => audio.buffer && { buffer: audio.buffer, name: audio.name }, onStart: () => audio.playing && pause() });
   status(`GPU: ${viz.describe()} · откройте трек`);
   requestAnimationFrame(frame);
 }

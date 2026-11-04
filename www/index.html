@@ -24,6 +24,34 @@
   <select id="preset"></select>
   <h2>Цвет и движение</h2>
   <div id="sliders"></div>
+  <h2>Экспорт</h2>
+  <label class="field">Кадр
+    <select id="ex-aspect">
+      <option value="wide">16:9 — YouTube</option>
+      <option value="tall">9:16 — Shorts, Reels, TikTok</option>
+      <option value="square">1:1</option>
+    </select>
+  </label>
+  <label class="field">Разрешение
+    <select id="ex-res">
+      <option value="720">720p</option>
+      <option value="1080" selected>1080p</option>
+      <option value="1440">1440p</option>
+      <option value="2160">4K</option>
+    </select>
+  </label>
+  <label class="field">Частота кадров
+    <select id="ex-fps">
+      <option value="30">30 к/с</option>
+      <option value="60" selected>60 к/с</option>
+    </select>
+  </label>
+  <div class="buttons">
+    <button id="ex-start" disabled>Экспорт MP4</button>
+    <button id="ex-cancel" hidden>Отмена</button>
+  </div>
+  <progress id="ex-progress" hidden></progress>
+  <p id="ex-status" class="note">Весь трек с текущим пресетом и ползунками, H.264 + AAC.</p>
 </aside>
 <script type="module" src="main.js"></script>
 </body>
