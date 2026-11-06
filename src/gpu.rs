@@ -380,6 +380,8 @@ struct Layers {
     background: wgpu::TextureView,
     bg_size: Option<(u32, u32)>,
     overlay: wgpu::TextureView,
+    /// Texture behind `overlay`, kept so text edits can be written in place.
+    overlay_tex: Option<wgpu::Texture>,
     has_overlay: bool,
     cover: wgpu::TextureView,
     has_cover: bool,
@@ -509,6 +511,7 @@ impl Renderer {
             background: empty("background"),
             bg_size: None,
             overlay: empty("overlay"),
+            overlay_tex: None,
             has_overlay: false,
             cover: empty("cover"),
             has_cover: false,
@@ -589,7 +592,48 @@ impl Renderer {
         self.layers.overlay =
             upload_rgba(&self.device, &self.queue, "overlay", img.unwrap_or(&empty), wgpu::TextureFormat::Rgba8Unorm);
         self.layers.has_overlay = img.is_some();
+        self.layers.overlay_tex = None;
         self.rebuild_targets(self.targets.size);
+    }
+
+    /// Text layer from raw RGBA bytes (`size` must match the target). When a layer of
+    /// the same size is already bound it is overwritten in place, without rebuilding
+    /// the render targets, so typing a caption stays cheap.
+    pub fn update_overlay(&mut self, size: (u32, u32), rgba: &[u8]) {
+        let extent = wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 };
+        let same = self.layers.has_overlay && self.layers.overlay_tex.as_ref().is_some_and(|t| (t.width(), t.height()) == size);
+        if !same {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("overlay"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.layers.overlay = tex.create_view(&Default::default());
+            self.layers.overlay_tex = Some(tex);
+        }
+        let tex = self.layers.overlay_tex.as_ref().unwrap();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * size.0), rows_per_image: Some(size.1) },
+            extent,
+        );
+        if !same {
+            self.layers.has_overlay = true;
+            self.rebuild_targets(self.targets.size);
+        }
+    }
+
+    /// Removes the text layer.
+    pub fn clear_overlay(&mut self) {
+        if self.layers.has_overlay {
+            self.set_overlay(None);
+        }
     }
 
     /// Center circle: `on` shows it (spectrum ring around it), `cover` is drawn

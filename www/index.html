@@ -4,54 +4,207 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>audio-viz web</title>
+<meta name="description" content="Аудиовизуализатор в браузере: WebGPU, 13 пресетов, тексты, обложка, ключевые кадры, экспорт MP4 до 4K быстрее реального времени.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <div id="stage">
     <canvas id="view"></canvas>
-    <div id="drop">Перетащите трек сюда или <label class="link">выберите файл<input id="file" type="file" accept="audio/*" hidden></label></div>
+    <div id="drop">Перетащите трек сюда или <label class="link">выберите файл<input id="file" type="file" accept="audio/*,video/*" hidden></label></div>
+    <div id="busy" hidden>Идёт экспорт — превью на паузе, чтобы GPU работал только на файл</div>
+    <button id="fullscreen" class="ghost" title="Во весь экран (F)">⛶</button>
   </div>
   <div id="transport">
-    <button id="play" disabled>▶</button>
+    <button id="play" disabled title="Пауза/воспроизведение (Space)">▶</button>
     <span id="time">0:00 / 0:00</span>
-    <input id="seek" type="range" min="0" max="1" step="0.001" value="0" disabled>
+    <span id="frag" class="muted"></span>
+    <label class="check" title="Крутить фрагмент по кругу (L)"><input id="loop" type="checkbox"> повтор</label>
+    <label class="link small">другой трек<input id="file2" type="file" accept="audio/*,video/*" hidden></label>
   </div>
+  <canvas id="timeline" title="Тяните — выделить фрагмент; края двигаются; клик — перемотка; двойной клик — весь трек; колесо — масштаб, Shift+колесо — сдвиг. Ромбы — ключи, флажки — сцены: клик — перейти, тянуть — сдвинуть, правый клик — удалить."></canvas>
   <p id="status">Загрузка…</p>
+  <p id="hint" class="muted small">Клавиши: Space — пауза · ←/→ — 5 с (Shift — 1 с) · N/P — пресет · [ ] — границы фрагмента · L — повтор · K — ключ · F — во весь экран · ⌘/Ctrl+S — сохранить проект</p>
 </main>
 <aside>
-  <h2>Пресет</h2>
-  <select id="preset"></select>
-  <h2>Цвет и движение</h2>
-  <div id="sliders"></div>
-  <h2>Экспорт</h2>
-  <label class="field">Кадр
-    <select id="ex-aspect">
-      <option value="wide">16:9 — YouTube</option>
-      <option value="tall">9:16 — Shorts, Reels, TikTok</option>
-      <option value="square">1:1</option>
-    </select>
-  </label>
-  <label class="field">Разрешение
-    <select id="ex-res">
-      <option value="720">720p</option>
-      <option value="1080" selected>1080p</option>
-      <option value="1440">1440p</option>
-      <option value="2160">4K</option>
-    </select>
-  </label>
-  <label class="field">Частота кадров
-    <select id="ex-fps">
-      <option value="30">30 к/с</option>
-      <option value="60" selected>60 к/с</option>
-    </select>
-  </label>
-  <div class="buttons">
-    <button id="ex-start" disabled>Экспорт MP4</button>
-    <button id="ex-cancel" hidden>Отмена</button>
-  </div>
-  <progress id="ex-progress" hidden></progress>
-  <p id="ex-status" class="note">Весь трек с текущим пресетом и ползунками, H.264 + AAC.</p>
+  <details open>
+    <summary>Пресет</summary>
+    <select id="preset"></select>
+    <p class="note" id="preset-note"></p>
+  </details>
+
+  <details open>
+    <summary>Цвет и движение</summary>
+    <div class="sliders" data-group="color"></div>
+  </details>
+
+  <details>
+    <summary>Эффекты</summary>
+    <div class="sliders" data-group="fx"></div>
+  </details>
+
+  <details>
+    <summary>Динамика (ключевые кадры)</summary>
+    <p class="note">«+ Ключ здесь», перейдите к другому моменту и поменяйте ползунки — там сам появится второй ключ. Между ключами всё плавно перетекает.</p>
+    <div class="buttons">
+      <button id="key-add" class="ghost" disabled>+ Ключ здесь</button>
+      <button id="key-del" class="ghost" disabled>Удалить ближний</button>
+    </div>
+    <div class="buttons">
+      <button id="key-prev" class="ghost" disabled>← ключ</button>
+      <button id="key-next" class="ghost" disabled>ключ →</button>
+      <button id="key-clear" class="ghost" disabled>Очистить</button>
+    </div>
+  </details>
+
+  <details>
+    <summary>Сцены</summary>
+    <p class="note">С начала сцены играет другой пресет: выберите его в списке, пока курсор стоит в сцене.</p>
+    <div class="buttons">
+      <button id="scene-add" class="ghost" disabled>+ Сцена здесь</button>
+      <button id="scene-del" class="ghost" disabled>Удалить текущую</button>
+    </div>
+    <div class="sliders" data-group="scene"></div>
+  </details>
+
+  <details>
+    <summary>Фрагмент</summary>
+    <div class="row2">
+      <label class="field">Начало <input id="frag-a" type="text" inputmode="decimal" disabled></label>
+      <label class="field">Конец <input id="frag-b" type="text" inputmode="decimal" disabled></label>
+    </div>
+    <div class="buttons">
+      <button id="frag-set-a" class="ghost" disabled title="[">[ здесь</button>
+      <button id="frag-set-b" class="ghost" disabled title="]">здесь ]</button>
+      <button id="frag-all" class="ghost" disabled>Весь трек</button>
+    </div>
+    <div class="sliders" data-group="fragment"></div>
+  </details>
+
+  <details>
+    <summary>Фон</summary>
+    <div class="buttons">
+      <label class="button ghost">Картинка…<input id="bg-file" type="file" accept="image/*" hidden></label>
+      <button id="bg-del" class="ghost" disabled>Убрать</button>
+    </div>
+    <div class="sliders" data-group="bg"></div>
+  </details>
+
+  <details>
+    <summary>Обложка в центре</summary>
+    <label class="check"><input id="circle" type="checkbox"> круг с обложкой и кольцом спектра</label>
+    <div class="buttons">
+      <label class="button ghost">Картинка…<input id="cover-file" type="file" accept="image/*" hidden></label>
+      <button id="cover-tags" class="ghost" disabled>Из тегов трека</button>
+      <button id="cover-del" class="ghost" disabled>Убрать</button>
+    </div>
+    <p class="note" id="cover-note"></p>
+    <div class="sliders" data-group="cover"></div>
+  </details>
+
+  <details>
+    <summary>Полоса прогресса</summary>
+    <div class="sliders" data-group="bar"></div>
+  </details>
+
+  <details>
+    <summary>Текст</summary>
+    <div id="texts"></div>
+    <div class="buttons"><button id="text-add" class="ghost">+ Надпись</button></div>
+    <p class="note">Надпись можно перетащить мышью прямо в кадре.</p>
+  </details>
+
+  <details>
+    <summary>Логотип</summary>
+    <div class="buttons">
+      <label class="button ghost">Картинка…<input id="logo-file" type="file" accept="image/*" hidden></label>
+      <button id="logo-del" class="ghost" disabled>Убрать</button>
+    </div>
+    <div id="logo-opts"></div>
+  </details>
+
+  <details>
+    <summary>Превью</summary>
+    <label class="field">Качество
+      <select id="pv-quality">
+        <option value="auto" selected>авто — держать плавность</option>
+        <option value="1">100%</option>
+        <option value="0.75">75%</option>
+        <option value="0.5">50%</option>
+        <option value="0.35">35% — слабый GPU</option>
+      </select>
+    </label>
+    <label class="check"><input id="pv-fps" type="checkbox" checked> показывать к/с</label>
+  </details>
+
+  <details open>
+    <summary>Экспорт</summary>
+    <label class="field">Что
+      <select id="ex-mode">
+        <option value="video" selected>Видео MP4</option>
+        <option value="wav">Только звук — WAV</option>
+        <option value="m4a">Только звук — M4A (AAC)</option>
+      </select>
+    </label>
+    <div id="ex-video">
+      <label class="field">Кадр
+        <select id="ex-aspect">
+          <option value="wide">16:9 — YouTube</option>
+          <option value="tall">9:16 — Shorts, Reels, TikTok</option>
+          <option value="square">1:1</option>
+        </select>
+      </label>
+      <div class="row2">
+        <label class="field">Разрешение
+          <select id="ex-res">
+            <option value="720">720p</option>
+            <option value="1080" selected>1080p</option>
+            <option value="1440">1440p</option>
+            <option value="2160">4K</option>
+          </select>
+        </label>
+        <label class="field">Кадров/с
+          <select id="ex-fps">
+            <option value="24">24</option>
+            <option value="25">25</option>
+            <option value="30">30</option>
+            <option value="50">50</option>
+            <option value="60" selected>60</option>
+          </select>
+        </label>
+      </div>
+      <div class="row2">
+        <label class="field">Кодек <select id="ex-codec"></select></label>
+        <label class="field">Битрейт <select id="ex-quality"></select></label>
+      </div>
+    </div>
+    <label class="check"><input id="ex-loud" type="checkbox"> громкость под YouTube (−14 LUFS)</label>
+    <div class="buttons">
+      <button id="ex-start" class="primary" disabled>Экспорт</button>
+      <button id="ex-png" class="ghost" disabled title="Текущий кадр в разрешении экспорта — например, обложка для видео">Кадр PNG</button>
+      <button id="ex-cancel" class="ghost" hidden>Отмена</button>
+    </div>
+    <progress id="ex-progress" hidden></progress>
+    <p id="ex-status" class="note">Выбранный фрагмент с текущими настройками.</p>
+    <p id="pro-line" class="note pro-line"></p>
+    <div id="pro-box" hidden>
+      <p class="note">Pro убирает водяной знак из видео и кадров. Всё остальное одинаково в обоих вариантах.</p>
+      <div class="buttons" id="pro-buy-row" hidden><a id="pro-buy" class="button primary" target="_blank" rel="noopener">Купить Pro</a></div>
+      <label class="field">Ключ <input id="pro-key" type="text" placeholder="AVZ1.…" autocomplete="off" spellcheck="false"></label>
+      <div class="buttons"><button id="pro-activate" class="ghost">Активировать</button><button id="pro-off" class="ghost" hidden>Выйти из Pro</button></div>
+      <p class="note" id="pro-status"></p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Проект</summary>
+    <p class="note">Настройки сохраняются в браузере сами. В файл проекта попадают и картинки; трек нужно открыть заново.</p>
+    <div class="buttons">
+      <button id="pj-save" class="ghost">Сохранить…</button>
+      <label class="button ghost">Открыть…<input id="pj-open" type="file" accept=".json,application/json" hidden></label>
+      <button id="pj-reset" class="ghost">Сбросить</button>
+    </div>
+  </details>
 </aside>
 <script type="module" src="main.js"></script>
 </body>
