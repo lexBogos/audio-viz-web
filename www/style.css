@@ -65,6 +65,21 @@ progress { width: 100%; accent-color: var(--accent); }
 .card .head .grow { flex: 1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .head button { padding: 2px 8px; }
 
+textarea.code { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 4; white-space: pre; overflow: auto; min-height: 12em; }
+textarea.code.bad { border-color: #c44; }
+pre.errors { white-space: pre-wrap; font: 11px/1.4 ui-monospace, Menlo, monospace; max-height: 9em; overflow: auto; }
+pre.errors.bad { color: #ff8080; }
+code { font: 12px ui-monospace, Menlo, monospace; color: var(--text); }
+.rec-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; font-variant-numeric: tabular-nums; }
+.rec-row::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: #f44; animation: blink 1s steps(2) infinite; }
+.rec-row.paused::before { animation: none; background: var(--muted); }
+@keyframes blink { 50% { opacity: .2; } }
+.meter { flex: 1; height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.meter > div { height: 100%; width: 0; background: #3c6; transition: width 60ms linear; }
+.meter > div.hot { background: #fc3; }
+.meter > div.clip { background: #f44; }
+body.nopanel aside { display: none; }
+
 @media (max-width: 860px) {
   body { flex-direction: column; height: auto; overflow: auto; }
   main { overflow: visible; }

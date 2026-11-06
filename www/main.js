@@ -8,6 +8,8 @@ import { rasterize, layerStates, captionAt, newText, newLogo, ANCHORS, ANIMS, FO
 import { bitmapFrom, pixels, coverFromTags, dataUrl } from './media.js';
 import { CODECS, QUALITY, frameSize, supportedCodecs, exportVideo, exportAudio, exportPng, pickFile, fadeGain, saveBlob } from './export.js';
 import * as license from './license.js';
+import { checkShader, formatErrors, openShaderFile, watchFile, TEMPLATE } from './shader.js';
+import { Recorder, canRecord, canRecordDisplay, inputs } from './record.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -62,7 +64,10 @@ const st = {
   texts: [], logo: null, logoBlob: null, bgBlob: null, coverBlob: null, coverFromTags: false, circle: false,
   export: { mode: 'video', aspect: 'wide', res: '1080', fps: '60', codec: 'avc', quality: '1', loud: false },
   preview: { quality: 'auto', fps: true },
+  shader: { code: null },
+  fonts: {}, // family → data URL of a font file the user added
 };
+let CUSTOM = 13; // index of the own preset, set from the module in setupUi
 let dirty = true; // the paused preview needs a redraw
 let overlay = { rgba: null, rects: new Array(10).fill(null), w: 0, h: 0, stale: true };
 const touch = () => (dirty = true);
@@ -499,10 +504,26 @@ function renderTexts() {
     const pos = field(card, 'Место', select(ANCHORS, item.anchor));
     pos.onchange = () => { item.offset = [0, 0]; set('anchor')(pos.value); };
     const fontList = FONTS.map((f) => [f, f.split(',')[0]]);
-    if (!FONTS.includes(item.font)) fontList.push([item.font, item.font]);
-    const font = field(card, 'Шрифт', select([...fontList, ['__custom', 'другой…']], item.font));
+    for (const fam of Object.keys(st.fonts)) fontList.push([fontFamily(fam), `${fam} (файл)`]);
+    if (!fontList.some(([v]) => v === item.font)) fontList.push([item.font, item.font]);
+    const font = field(card, 'Шрифт', select([...fontList, ['__file', 'из файла (.ttf, .otf, .woff)…'], ['__custom', 'установленный, по названию…']], item.font));
     font.onchange = () => {
-      if (font.value === '__custom') {
+      if (font.value === '__file') {
+        const inp = Object.assign(document.createElement('input'), { type: 'file', accept: '.ttf,.otf,.woff,.woff2,font/*' });
+        inp.onchange = async () => {
+          const f = inp.files[0];
+          if (!f) return renderTexts();
+          try {
+            const fam = await addFontFile(f);
+            set('font')(fontFamily(fam));
+          } catch (e) {
+            status(`Шрифт не загрузился: ${e.message ?? e}`);
+          }
+          renderTexts();
+        };
+        inp.addEventListener('cancel', renderTexts);
+        inp.click();
+      } else if (font.value === '__custom') {
         const name = prompt('Название шрифта, установленного на компьютере (например, «Montserrat»):', '');
         if (name) set('font')(`"${name.replace(/"/g, '')}", sans-serif`);
         renderTexts();
@@ -545,6 +566,250 @@ function renderTexts() {
     box.append(card);
   });
   $('text-add').disabled = st.texts.length >= MAX_TEXTS;
+}
+
+// ---------------------------------------------------------------- fonts from files
+
+const FONTS_STORE = 'audio-viz.fonts';
+const fontFamily = (fam) => `"${fam}", sans-serif`;
+
+async function registerFont(fam, url) {
+  const data = await (await fetch(url)).arrayBuffer();
+  const face = new FontFace(fam, data);
+  await face.load();
+  document.fonts.add(face);
+}
+
+/** Adds a font file for captions; returns its family name. */
+async function addFontFile(file) {
+  const fam = file.name.replace(/\.[^.]+$/, '').replace(/["\\]/g, '').trim() || 'Шрифт';
+  const url = await dataUrl(file);
+  await registerFont(fam, url);
+  st.fonts[fam] = url;
+  saveFonts();
+  return fam;
+}
+
+function saveFonts() {
+  try { localStorage.setItem(FONTS_STORE, JSON.stringify(st.fonts)); } catch { status('Шрифт не поместился в память браузера: он сохранится только в файле проекта.'); }
+}
+
+async function restoreFonts(fonts) {
+  for (const [fam, url] of Object.entries(fonts ?? {})) {
+    if (st.fonts[fam]) continue;
+    try { await registerFont(fam, url); st.fonts[fam] = url; } catch {}
+  }
+}
+
+// ---------------------------------------------------------------- own shader
+
+let shaderSeq = 0, shaderTimer = 0, stopWatch = null;
+const presetCount = () => CUSTOM + (st.shader.code ? 1 : 0);
+
+function shaderStatus(text, bad = false) {
+  $('sh-status').textContent = text;
+  $('sh-status').classList.toggle('bad', bad);
+  $('sh-code').classList.toggle('bad', bad);
+}
+
+function refreshPresetOptions() {
+  const sel = $('preset');
+  const opt = [...sel.options].find((o) => +o.value === CUSTOM);
+  if (st.shader.code && !opt) sel.add(new Option('★ свой шейдер', CUSTOM));
+  if (!st.shader.code && opt) opt.remove();
+  $('sh-del').disabled = !st.shader.code;
+  sel.value = viz.preset_at(position());
+}
+
+/** Compiles `code` and, when it is valid, makes it the own preset (and plays it). */
+async function applyShader(code, { select = true } = {}) {
+  const seq = ++shaderSeq;
+  if (!code.trim()) { shaderStatus('Код пустой.', true); return false; }
+  let errors;
+  try {
+    errors = await checkShader(Viz.prelude(), code);
+  } catch (e) {
+    errors = [{ line: 0, col: 0, text: String(e.message ?? e) }];
+  }
+  if (seq !== shaderSeq) return false; // a newer edit is being checked
+  if (errors.length) { shaderStatus(formatErrors(errors), true); return false; }
+  try {
+    viz.set_custom_shader(code);
+  } catch (e) {
+    shaderStatus(String(e), true);
+    return false;
+  }
+  st.shader.code = code;
+  refreshPresetOptions();
+  if (select && viz.preset_at(position()) !== CUSTOM) choosePreset(CUSTOM);
+  shaderStatus(`Работает · ${new Date().toLocaleTimeString()}${stopWatch ? ' · файл перечитывается при сохранении' : ''}`);
+  touch();
+  saveSoon();
+  return true;
+}
+
+function removeShader() {
+  stopWatch?.();
+  stopWatch = null;
+  viz.set_custom_shader(undefined);
+  st.shader.code = null;
+  refreshPresetOptions();
+  refreshMarkers();
+  shaderStatus('Свой пресет убран; сцены с ним теперь играют первый пресет.');
+  touch();
+  saveSoon();
+}
+
+function setShaderText(text) {
+  $('sh-code').value = text;
+  applyShader(text);
+}
+
+function setupShader() {
+  const code = $('sh-code');
+  code.oninput = () => {
+    if (!$('sh-live').checked) return;
+    clearTimeout(shaderTimer);
+    shaderTimer = setTimeout(() => applyShader(code.value), 350);
+  };
+  code.onkeydown = (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); applyShader(code.value); }
+    else if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); code.setRangeText('    ', code.selectionStart, code.selectionEnd, 'end'); code.oninput(); }
+  };
+  $('sh-apply').onclick = () => applyShader(code.value);
+  $('sh-new').onclick = () => setShaderText(TEMPLATE);
+  $('sh-from').onclick = () => {
+    const i = viz.preset_at(position());
+    setShaderText(i === CUSTOM ? code.value : `// Основа: ${Viz.presets()[i]}\n${Viz.preset_body(i)}`);
+  };
+  $('sh-del').onclick = removeShader;
+  $('sh-save').onclick = async () => {
+    const name = 'my-preset.wgsl';
+    const handle = await pickFile(name, 'Шейдер WGSL', 'text/plain', '.wgsl');
+    if (handle === null) return;
+    await saveBlob(handle, new Blob([code.value], { type: 'text/plain' }), name);
+  };
+  $('sh-file').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (f) setShaderText(await f.text());
+    e.target.value = '';
+  };
+  $('sh-open').onclick = async () => {
+    let opened;
+    try {
+      opened = await openShaderFile();
+    } catch (e) {
+      return shaderStatus(`Не удалось открыть: ${e.message}`, true);
+    }
+    if (opened === undefined) return;
+    if (opened === null) return $('sh-file').click(); // no File System Access API: plain upload, no watching
+    stopWatch?.();
+    stopWatch = watchFile(opened.handle, opened.modified, (text) => setShaderText(text));
+    setShaderText(opened.text);
+  };
+}
+
+// ---------------------------------------------------------------- recording
+
+const rec = { r: null, result: null, raf: 0 };
+
+async function fillRecSources() {
+  const sel = $('rec-source');
+  const keep = sel.value;
+  sel.textContent = '';
+  if (canRecordDisplay()) sel.add(new Option('Звук вкладки или экрана', 'display'));
+  sel.add(new Option('Микрофон / вход по умолчанию', ''));
+  for (const [id, label] of await inputs()) sel.add(new Option(label, id));
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  recHint();
+}
+
+function recHint(text) {
+  $('rec-hint').textContent = text ?? ($('rec-source').value === 'display'
+    ? 'Браузер спросит, что показать: выберите вкладку с музыкой (или весь экран, если браузер умеет отдавать звук системы) и включите «Поделиться звуком». Видео не записывается.'
+    : '');
+}
+
+function recUi(state) {
+  const live = state === 'live' || state === 'paused';
+  $('rec-start').hidden = live;
+  $('rec-pause').hidden = !live;
+  $('rec-stop').hidden = !live;
+  $('rec-live').hidden = !live;
+  $('rec-source').disabled = live;
+  $('rec-pause').textContent = state === 'paused' ? 'Продолжить' : 'Пауза';
+  document.querySelector('.rec-row').classList.toggle('paused', state === 'paused');
+  if (live) $('rec-done').hidden = true;
+}
+
+function recMeter() {
+  if (!rec.r) return;
+  rec.raf = requestAnimationFrame(recMeter);
+  const lv = rec.r.paused ? 0 : rec.r.level();
+  const bar = $('rec-level');
+  bar.style.width = `${(lv * 100).toFixed(1)}%`;
+  bar.className = lv > 0.98 ? 'clip' : lv > 0.7 ? 'hot' : '';
+  $('rec-time').textContent = clock(rec.r.time());
+}
+
+async function startRec() {
+  if (exporting) return recHint('Дождитесь конца экспорта.');
+  const source = $('rec-source').value;
+  const r = new Recorder();
+  try {
+    await r.start(source, stopRec);
+  } catch (e) {
+    return recHint(e.name === 'NotAllowedError' ? 'Доступ не дан: разрешите запись в браузере и попробуйте ещё раз.' : `Не удалось начать запись: ${e.message ?? e}`);
+  }
+  if (audio.playing) pause();
+  rec.r = r;
+  recUi('live');
+  recHint('');
+  recMeter();
+  if (source !== 'display') fillRecSources(); // device names are known now
+}
+
+async function stopRec() {
+  const r = rec.r;
+  if (!r) return;
+  rec.r = null;
+  cancelAnimationFrame(rec.raf);
+  const res = await r.stop();
+  recUi('idle');
+  const d = new Date(), pad = (n) => String(n).padStart(2, '0');
+  res.name = `запись ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}-${pad(d.getMinutes())}.${res.ext}`;
+  rec.result = res;
+  $('rec-info').textContent = `${res.name} · ${clock(res.seconds)} · ${(res.blob.size / 1e6).toFixed(1)} МБ`;
+  $('rec-done').hidden = false;
+}
+
+function setupRecord() {
+  if (!canRecord()) {
+    $('rec-start').disabled = true;
+    $('rec-hint').textContent = 'Этот браузер не умеет записывать звук.';
+    return;
+  }
+  fillRecSources();
+  navigator.mediaDevices.addEventListener?.('devicechange', () => !rec.r && fillRecSources());
+  $('rec-source').onchange = () => recHint();
+  $('rec-start').onclick = startRec;
+  $('rec-stop').onclick = stopRec;
+  $('rec-pause').onclick = () => {
+    if (!rec.r) return;
+    if (rec.r.paused) { rec.r.resume(); recUi('live'); } else { rec.r.pause(); recUi('paused'); }
+  };
+  $('rec-use').onclick = () => {
+    const { blob, name } = rec.result ?? {};
+    if (blob) openFile(new File([blob], name, { type: blob.type }));
+  };
+  $('rec-save').onclick = async () => {
+    const { blob, name, ext } = rec.result ?? {};
+    if (!blob) return;
+    const handle = await pickFile(name, 'Запись звука', blob.type, `.${ext}`);
+    if (handle === null) return;
+    await saveBlob(handle, blob, name);
+    status(`Запись сохранена: ${name}`);
+  };
 }
 
 function renderLogoOpts() {
@@ -778,8 +1043,9 @@ function snapshot(withImages) {
     app: 'audio-viz-web', version: 1, track: st.trackName ?? null,
     viz: JSON.parse(viz.project_json()),
     fragment: st.fragment, fadeIn: st.fadeIn, fadeOut: st.fadeOut, loop: st.loop, sceneFade: st.sceneFade, circle: st.circle,
-    texts, logo, export: st.export, preview: st.preview,
+    texts, logo, export: st.export, preview: st.preview, shader: st.shader.code,
     images: withImages ? st.images : undefined,
+    fonts: withImages ? st.fonts : undefined,
   };
 }
 
@@ -799,7 +1065,14 @@ async function saveProject() {
 }
 
 async function applyProject(p, withImages) {
+  // The own preset first, so the project's scenes can refer to it.
+  if (p.shader) {
+    $('sh-code').value = p.shader;
+    await applyShader(p.shader, { select: false });
+  } else if (st.shader.code) removeShader();
+  if (withImages) await restoreFonts(p.fonts);
   if (p.viz) viz.load_project_json(JSON.stringify(p.viz));
+  refreshPresetOptions();
   st.fadeIn = p.fadeIn ?? 0;
   st.fadeOut = p.fadeOut ?? 0;
   st.loop = !!p.loop;
@@ -851,17 +1124,21 @@ function enableTrackUi() {
   $('ex-png').disabled = exporting || st.export.mode !== 'video';
 }
 
+function choosePreset(i) {
+  const n = presetCount();
+  i = (i + n) % n;
+  $('preset').value = i;
+  viz.set_preset(i, position());
+  touch();
+  saveSoon();
+}
+
 function setupUi() {
   const presets = Viz.presets();
+  CUSTOM = Viz.custom_index();
   const select = $('preset');
   presets.forEach((name, i) => select.add(new Option(name, i)));
-  const choose = (i) => {
-    i = (i + presets.length) % presets.length;
-    select.value = i;
-    viz.set_preset(i, position());
-    touch();
-    saveSoon();
-  };
+  const choose = choosePreset;
   select.onchange = () => choose(+select.value);
 
   for (const s of LOOK) lookSlider(...s);
@@ -883,7 +1160,7 @@ function setupUi() {
   $('key-clear').onclick = () => { viz.clear_keys(position() ?? 0); refreshMarkers(); saveSoon(); };
   $('scene-add').onclick = () => {
     const t = position() ?? 0;
-    viz.add_scene(t, (viz.preset_at(t) + 1) % presets.length);
+    viz.add_scene(t, (viz.preset_at(t) + 1) % presetCount());
     refreshMarkers();
     saveSoon();
   };
@@ -961,12 +1238,16 @@ function setupUi() {
       case 'KeyL': $('loop').click(); break;
       case 'KeyK': addKey(); break;
       case 'KeyF': $('fullscreen').click(); break;
+      case 'KeyO': $('file').click(); break;
+      case 'KeyH': document.body.classList.toggle('nopanel'); touch(); break;
       case 'Home': seek(st.fragment[0]); break;
       case 'End': seek(st.fragment[1]); break;
     }
   });
 
   setupCaptionDrag();
+  setupShader();
+  setupRecord();
 }
 
 async function main() {
@@ -983,6 +1264,7 @@ async function main() {
     return;
   }
   setupUi();
+  try { await restoreFonts(JSON.parse(localStorage.getItem(FONTS_STORE) ?? '{}')); } catch {}
   // Restore the last session's settings (without images and track).
   try {
     const saved = JSON.parse(localStorage.getItem(AUTOSAVE) ?? 'null');

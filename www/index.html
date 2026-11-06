@@ -24,13 +24,32 @@
   </div>
   <canvas id="timeline" title="Тяните — выделить фрагмент; края двигаются; клик — перемотка; двойной клик — весь трек; колесо — масштаб, Shift+колесо — сдвиг. Ромбы — ключи, флажки — сцены: клик — перейти, тянуть — сдвинуть, правый клик — удалить."></canvas>
   <p id="status">Загрузка…</p>
-  <p id="hint" class="muted small">Клавиши: Space — пауза · ←/→ — 5 с (Shift — 1 с) · N/P — пресет · [ ] — границы фрагмента · L — повтор · K — ключ · F — во весь экран · ⌘/Ctrl+S — сохранить проект</p>
+  <p id="hint" class="muted small">Клавиши: Space — пауза · ←/→ — 5 с (Shift — 1 с) · N/P — пресет · [ ] — границы фрагмента · L — повтор · K — ключ · F — во весь экран · O — открыть трек · H — скрыть панель · ⌘/Ctrl+S — сохранить проект</p>
 </main>
 <aside>
   <details open>
     <summary>Пресет</summary>
     <select id="preset"></select>
     <p class="note" id="preset-note"></p>
+  </details>
+
+  <details>
+    <summary>Свой шейдер</summary>
+    <p class="note">Пресет на WGSL: одна функция <code>fn scene(uv, frag) -&gt; vec3&lt;f32&gt;</code>, как <code>--shader</code> в десктопной версии. Он появится в списке пресетов как «★ свой шейдер» и сохраняется в проекте.</p>
+    <div class="buttons">
+      <button id="sh-open" class="ghost" title="Файл перечитывается при каждом сохранении в редакторе">Открыть .wgsl…</button>
+      <button id="sh-from" class="ghost" title="Код текущего пресета как основа">Из текущего пресета</button>
+      <button id="sh-new" class="ghost">Шаблон</button>
+    </div>
+    <input id="sh-file" type="file" accept=".wgsl,.txt,text/plain" hidden>
+    <textarea id="sh-code" class="code" rows="14" spellcheck="false" autocomplete="off" placeholder="fn scene(uv: vec2&lt;f32&gt;, frag: vec2&lt;f32&gt;) -&gt; vec3&lt;f32&gt; { … }"></textarea>
+    <label class="check"><input id="sh-live" type="checkbox" checked> применять при вводе</label>
+    <div class="buttons">
+      <button id="sh-apply" class="ghost" title="Ctrl/⌘+Enter">Применить</button>
+      <button id="sh-save" class="ghost">Скачать .wgsl</button>
+      <button id="sh-del" class="ghost" disabled>Убрать</button>
+    </div>
+    <pre id="sh-status" class="note errors"></pre>
   </details>
 
   <details open>
@@ -193,6 +212,28 @@
       <label class="field">Ключ <input id="pro-key" type="text" placeholder="AVZ1.…" autocomplete="off" spellcheck="false"></label>
       <div class="buttons"><button id="pro-activate" class="ghost">Активировать</button><button id="pro-off" class="ghost" hidden>Выйти из Pro</button></div>
       <p class="note" id="pro-status"></p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Запись звука</summary>
+    <p class="note">Запишите звук с микрофона, любого входа или из вкладки/экрана и сразу откройте его в визуализаторе. Звук самого audio-viz на время записи выключается.</p>
+    <label class="field">Источник <select id="rec-source"></select></label>
+    <p class="note" id="rec-hint"></p>
+    <div class="buttons">
+      <button id="rec-start" class="ghost">● Записать</button>
+      <button id="rec-pause" class="ghost" hidden>Пауза</button>
+      <button id="rec-stop" class="primary" hidden>Стоп</button>
+    </div>
+    <div id="rec-live" hidden>
+      <div class="rec-row"><span id="rec-time">0:00</span><div class="meter"><div id="rec-level"></div></div></div>
+    </div>
+    <div id="rec-done" hidden>
+      <p class="note" id="rec-info"></p>
+      <div class="buttons">
+        <button id="rec-use" class="primary">Открыть в визуализаторе</button>
+        <button id="rec-save" class="ghost">Сохранить файл…</button>
+      </div>
     </div>
   </details>
 

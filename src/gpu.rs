@@ -563,6 +563,14 @@ impl Renderer {
         Ok(self.pipelines.len() - 1)
     }
 
+    /// Recompiles pipeline `id` from a new source in place (for a preset that is
+    /// edited live, so old versions don't pile up). Same id afterwards.
+    pub fn replace_pipeline(&mut self, id: usize, src: &str) -> Result<usize> {
+        let p = build_scene_pipeline(&self.device, &self.scene_layout, src)?;
+        self.pipelines[id] = (source_hash(src), p);
+        Ok(id)
+    }
+
     pub fn resize(&mut self, size: (u32, u32)) {
         if size != self.targets.size {
             self.rebuild_targets(size);

@@ -101,15 +101,41 @@ struct Project {
     background: Option<Rc<image::RgbaImage>>,
     cover: Option<Rc<image::RgbaImage>>,
     circle: bool,
+    /// Body of the user's own preset (WGSL with `fn scene`), played as preset `CUSTOM`.
+    custom: Option<Rc<str>>,
 }
+
+/// Index of the user's own preset, right after the built-in ones.
+const CUSTOM: usize = BUILTIN.len();
 
 impl Default for Project {
     fn default() -> Self {
-        Project { look: Look::default(), anim: Animation::default(), preset: 0, scenes: vec![], scene_fade: 1.5, background: None, cover: None, circle: false }
+        Project { look: Look::default(), anim: Animation::default(), preset: 0, scenes: vec![], scene_fade: 1.5, background: None, cover: None, circle: false, custom: None }
     }
 }
 
 impl Project {
+    /// A preset index that exists now: the custom one only while it is loaded.
+    fn valid(&self, i: usize) -> usize {
+        if i < CUSTOM || (i == CUSTOM && self.custom.is_some()) { i } else { 0 }
+    }
+
+    /// Full WGSL module of a preset.
+    fn source(&self, i: usize) -> Result<String, JsValue> {
+        match (self.valid(i), &self.custom) {
+            (CUSTOM, Some(body)) => Ok(format!("{}\n{body}", presets::PRELUDE)),
+            (i, _) => Preset::Builtin(i).source().map_err(js_err),
+        }
+    }
+
+    fn preset_name(&self, i: usize) -> String {
+        if self.valid(i) == CUSTOM { "custom".into() } else { BUILTIN[self.valid(i)].0.into() }
+    }
+
+    fn preset_index(&self, name: &str) -> usize {
+        if name == "custom" { self.valid(CUSTOM) } else { BUILTIN.iter().position(|(n, _)| *n == name).unwrap_or(0) }
+    }
+
     fn look_at(&self, t: f64) -> Look {
         self.anim.at(&self.look, t)
     }
@@ -140,10 +166,6 @@ struct ProjectData {
     circle: bool,
 }
 
-fn preset_index(name: &str) -> usize {
-    BUILTIN.iter().position(|(n, _)| *n == name).unwrap_or(0)
-}
-
 /// A renderer plus the pipeline id of each preset it has compiled.
 struct Stage {
     renderer: Renderer,
@@ -152,12 +174,12 @@ struct Stage {
 
 impl Stage {
     fn new(gpu: &Gpu, format: wgpu::TextureFormat, size: (u32, u32), p: &Project) -> Result<Stage, JsValue> {
-        let src = Preset::Builtin(p.preset).source().map_err(js_err)?;
+        let src = Preset::Builtin(0).source().map_err(js_err)?;
         let renderer = Renderer::new(gpu, &src, format, size).map_err(js_err)?;
-        let mut stage = Stage { renderer, pipes: vec![None; BUILTIN.len()] };
+        let mut stage = Stage { renderer, pipes: vec![None; CUSTOM + 1] };
         stage.apply_images(p);
         for preset in p.presets_used() {
-            stage.pipe(preset)?;
+            stage.pipe(preset, p)?;
         }
         Ok(stage)
     }
@@ -168,12 +190,12 @@ impl Stage {
     }
 
     /// Pipeline id of a preset, compiled on first use.
-    fn pipe(&mut self, preset: usize) -> Result<usize, JsValue> {
-        let preset = preset % BUILTIN.len();
+    fn pipe(&mut self, preset: usize, p: &Project) -> Result<usize, JsValue> {
+        let preset = p.valid(preset);
         if let Some(id) = self.pipes[preset] {
             return Ok(id);
         }
-        let src = Preset::Builtin(preset).source().map_err(js_err)?;
+        let src = p.source(preset)?;
         let id = self.renderer.pipeline(&src).map_err(js_err)?;
         self.pipes[preset] = Some(id);
         Ok(id)
@@ -210,16 +232,16 @@ fn encode_frame(
             let f = motion.track(analysis, t, &|x| p.look_at(x));
             let progress = args.progress.unwrap_or((t / duration) as f32);
             let (from, to) = animation::scene_at(&p.preset, &p.scenes, t, p.scene_fade);
-            let scene = Some(stage.pipe(*from)?);
+            let scene = Some(stage.pipe(*from, p)?);
             let blend = match to {
-                Some((to, k)) => Some((stage.pipe(*to)?, k)),
+                Some((to, k)) => Some((stage.pipe(*to, p)?, k)),
                 None => None,
             };
             (Uniforms::new(&f, size, motion.time(), progress), p.look_at(t).at_time(t), progress, scene, blend)
         }
         _ => {
             let f = motion.idle(wall, &p.look);
-            let scene = Some(stage.pipe(p.preset)?);
+            let scene = Some(stage.pipe(p.preset, p)?);
             (Uniforms::new(&f, size, motion.time(), 0.0), p.look.at_time(wall), 0.0, scene, None)
         }
     };
@@ -322,6 +344,50 @@ impl Viz {
         BUILTIN.iter().map(|(n, _)| n.to_string()).collect()
     }
 
+    /// Shared WGSL header every preset is appended to (uniforms and helpers).
+    pub fn prelude() -> String {
+        presets::PRELUDE.to_string()
+    }
+
+    /// Index of the user's own preset (right after the built-in ones).
+    pub fn custom_index() -> usize {
+        CUSTOM
+    }
+
+    /// Source of a built-in preset's body, as a starting point for your own.
+    pub fn preset_body(index: usize) -> String {
+        BUILTIN[index.min(CUSTOM - 1)].1.to_string()
+    }
+
+    /// Loads (or with None removes) the user's own preset: a WGSL body with
+    /// `fn scene(uv, frag) -> vec3<f32>`. The page checks that it compiles first,
+    /// since WebGPU reports shader errors only asynchronously. Removing it switches
+    /// scenes that used it back to the first preset.
+    pub fn set_custom_shader(&mut self, body: Option<String>) -> Result<(), JsValue> {
+        let p = &mut self.project;
+        p.custom = body.map(Rc::from);
+        let old = self.stage.pipes[CUSTOM].take();
+        if p.custom.is_none() {
+            p.preset = p.valid(p.preset);
+            for s in p.scenes.iter_mut().filter(|s| s.1 >= CUSTOM) {
+                s.1 = 0;
+            }
+            return Ok(());
+        }
+        // Reuse the old slot unless a built-in preset shares it (same source).
+        let stage = &mut self.stage;
+        match old.filter(|id| *id != stage.renderer.base() && !stage.pipes[..CUSTOM].contains(&Some(*id))) {
+            Some(id) => {
+                let src = self.project.source(CUSTOM)?;
+                stage.pipes[CUSTOM] = Some(stage.renderer.replace_pipeline(id, &src).map_err(js_err)?);
+            }
+            None => {
+                stage.pipe(CUSTOM, &self.project)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Largest texture side the GPU allows (caps the export size).
     pub fn max_size(&self) -> u32 {
         self.gpu.device.limits().max_texture_dimension_2d
@@ -341,8 +407,8 @@ impl Viz {
     /// Sets the preset playing at `t`: the scene's own when `t` is inside a scene,
     /// otherwise the base preset. Compiles it now, so playback doesn't stutter later.
     pub fn set_preset(&mut self, index: usize, t: Option<f64>) -> Result<(), JsValue> {
-        let index = index % BUILTIN.len();
-        self.stage.pipe(index)?;
+        let index = self.project.valid(index);
+        self.stage.pipe(index, &self.project)?;
         match t.and_then(|t| self.project.scene_index(t)) {
             Some(i) => self.project.scenes[i].1 = index,
             None => self.project.preset = index,
@@ -360,8 +426,8 @@ impl Viz {
 
     /// Starts a scene at `t` (or retargets one within 50 ms) with `preset`. Returns its index.
     pub fn add_scene(&mut self, t: f64, preset: usize) -> Result<usize, JsValue> {
-        let preset = preset % BUILTIN.len();
-        self.stage.pipe(preset)?;
+        let preset = self.project.valid(preset);
+        self.stage.pipe(preset, &self.project)?;
         let s = &mut self.project.scenes;
         if let Some(i) = s.iter().position(|(st, _)| (st - t).abs() < 0.05) {
             s[i].1 = preset;
@@ -413,8 +479,8 @@ impl Viz {
         let data = ProjectData {
             look: p.look,
             keys: p.anim.keys.iter().map(|k| (k.t, k.look)).collect(),
-            preset: BUILTIN[p.preset].0.into(),
-            scenes: p.scenes.iter().map(|(t, i)| (*t, BUILTIN[*i].0.to_string())).collect(),
+            preset: p.preset_name(p.preset),
+            scenes: p.scenes.iter().map(|(t, i)| (*t, p.preset_name(*i))).collect(),
             scene_fade: p.scene_fade,
             circle: p.circle,
         };
@@ -428,13 +494,13 @@ impl Viz {
         p.look = d.look;
         p.anim.keys = d.keys.into_iter().map(|(t, look)| animation::Key { t, look }).collect();
         p.anim.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
-        p.preset = preset_index(&d.preset);
-        p.scenes = d.scenes.iter().map(|(t, n)| (*t, preset_index(n))).collect();
+        p.preset = p.preset_index(&d.preset);
+        p.scenes = d.scenes.iter().map(|(t, n)| (*t, p.preset_index(n))).collect();
         p.scenes.sort_by(|a, b| a.0.total_cmp(&b.0));
         p.scene_fade = if d.scene_fade > 0.0 { d.scene_fade } else { 1.5 };
         p.circle = d.circle;
-        for preset in p.presets_used() {
-            self.stage.pipe(preset)?;
+        for preset in self.project.presets_used() {
+            self.stage.pipe(preset, &self.project)?;
         }
         self.stage.renderer.set_circle(self.project.circle, self.project.cover.as_deref());
         Ok(())
